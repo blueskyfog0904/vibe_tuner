@@ -5,6 +5,7 @@ abstract class PitchRepository {
   Stream<TuningResult> get pitchStream;
   Future<void> initialize();
   void updateProcessingConfig(TunerProcessingConfig config);
+  void updateInputSampleRate(double sampleRate);
   void addAudioData(List<double> buffer);
   void dispose();
 }

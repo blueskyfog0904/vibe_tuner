@@ -5,6 +5,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart';
 
+import '../../../../core/constants/audio_constants.dart';
 import '../../../../core/logging/error_reporter.dart';
 import '../../../../core/math/note_calculator.dart';
 import '../../../audio_processing/presentation/providers/audio_state_provider.dart';
@@ -28,16 +29,22 @@ final pitchRepositoryProvider = Provider.autoDispose<PitchRepository>((ref) {
 final hapticManagerProvider = Provider<HapticManager>((ref) => HapticManager());
 
 /// Main Tuner State Provider
-final tunerStateProvider = StateNotifierProvider.autoDispose<TunerStateNotifier, TuningResult>((ref) {
-  // We watch the pitch repo so that if it changes (recreated), we recreate the notifier.
-  // Also keeps the repo alive as long as the notifier is alive.
-  final pitchRepo = ref.watch(pitchRepositoryProvider);
-  final config = ref.watch(tunerProcessingConfigProvider);
-  final settings = ref.watch(tunerSettingsProvider).valueOrNull ?? const TunerSettings.defaults();
-  return TunerStateNotifier(ref, pitchRepo, config, settings);
-});
+final tunerStateProvider =
+    StateNotifierProvider.autoDispose<TunerStateNotifier, TuningResult>((ref) {
+      // We watch the pitch repo so that if it changes (recreated), we recreate the notifier.
+      // Also keeps the repo alive as long as the notifier is alive.
+      final pitchRepo = ref.watch(pitchRepositoryProvider);
+      final config = ref.watch(tunerProcessingConfigProvider);
+      final settings =
+          ref.watch(tunerSettingsProvider).valueOrNull ??
+          const TunerSettings.defaults();
+      return TunerStateNotifier(ref, pitchRepo, config, settings);
+    });
 
 class TunerStateNotifier extends StateNotifier<TuningResult> {
+  static const int _noSignalHoldMs = AudioConstants.noSignalHoldMs;
+  static const int _noSignalDropFrames = AudioConstants.noSignalDropFrames;
+
   final Ref _ref;
   final PitchRepository _pitchRepo;
   final TunerProcessingConfig _config;
@@ -48,17 +55,18 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
   late final NoteCalculator _noteCalculator;
   StreamSubscription? _audioSubscription;
   StreamSubscription? _pitchSubscription;
+  DateTime? _lastDetectedAt;
+  TuningResult? _lastDetectedResult;
+  int _pendingNoSignalFrames = 0;
+  double? _lastInputSampleRate;
 
-  TunerStateNotifier(
-    this._ref,
-    this._pitchRepo,
-    this._config,
-    this._settings,
-  ) : super(TuningResult.noSignal()) {
+  TunerStateNotifier(this._ref, this._pitchRepo, this._config, this._settings)
+    : super(TuningResult.noSignal()) {
     _noteCalculator = NoteCalculator(
       a4Reference: _settings.a4Reference,
-      perfectCentsThreshold:
-          perfectCentsThresholdFromSensitivity(_settings.sensitivity),
+      perfectCentsThreshold: perfectCentsThresholdFromSensitivity(
+        _settings.sensitivity,
+      ),
     );
     _allowedNotes = allowedNoteNamesFromPreset(_settings.tuningPreset);
     // _initialize(); // Don't auto-start. Let the UI control it.
@@ -73,6 +81,11 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     if (_audioSubscription != null) return; // Already started
 
     _logger.i("TunerStateNotifier: Starting...");
+    _pendingNoSignalFrames = 0;
+    _lastDetectedAt = null;
+    _lastDetectedResult = null;
+    _lastInputSampleRate = null;
+    _frequencyBuffer.clear();
     final audioSource = _ref.read(audioSourceProvider);
     final hapticManager = _ref.read(hapticManagerProvider);
 
@@ -86,7 +99,7 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
               AVAudioSessionCategoryOptions.defaultToSpeaker |
               AVAudioSessionCategoryOptions.allowBluetooth |
               AVAudioSessionCategoryOptions.allowAirPlay,
-          avAudioSessionMode: AVAudioSessionMode.defaultMode,
+          avAudioSessionMode: AVAudioSessionMode.measurement,
           avAudioSessionRouteSharingPolicy:
               AVAudioSessionRouteSharingPolicy.defaultPolicy,
           avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
@@ -130,30 +143,44 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     _pitchSubscription = _pitchRepo.pitchStream.listen(
       (rawResult) {
         if (!mounted) return;
-        // ... logic ...
         if (rawResult.status == TuningStatus.noSignal) {
+          _pendingNoSignalFrames++;
+          final now = DateTime.now();
+          final withinHoldWindow =
+              _lastDetectedAt != null &&
+              now.difference(_lastDetectedAt!).inMilliseconds <=
+                  _noSignalHoldMs;
+          final belowDropFrames = _pendingNoSignalFrames < _noSignalDropFrames;
+
+          if ((withinHoldWindow || belowDropFrames) &&
+              _lastDetectedResult != null) {
+            state = _lastDetectedResult!;
+            return;
+          }
+
           _frequencyBuffer.clear();
+          _lastDetectedResult = null;
           state = rawResult;
-        } else {
-          _frequencyBuffer.add(rawResult.frequency);
-          if (_frequencyBuffer.length > _config.smoothingWindowSize) {
-            _frequencyBuffer.removeFirst();
-          }
-
-          double averageFreq = 0;
-          if (_frequencyBuffer.isNotEmpty) {
-            averageFreq =
-                _frequencyBuffer.reduce((a, b) => a + b) /
-                _frequencyBuffer.length;
-          }
-
-          final smoothedResult = _noteCalculator.calculate(
-            averageFreq,
-            allowedNoteNames: _allowedNotes,
-          );
-          hapticManager.feedback(smoothedResult.status);
-          state = smoothedResult;
+          return;
         }
+
+        _pendingNoSignalFrames = 0;
+        _lastDetectedAt = DateTime.now();
+        _frequencyBuffer.add(rawResult.frequency);
+        if (_frequencyBuffer.length > _config.smoothingWindowSize) {
+          _frequencyBuffer.removeFirst();
+        }
+
+        final averageFreq =
+            _frequencyBuffer.reduce((a, b) => a + b) / _frequencyBuffer.length;
+
+        final smoothedResult = _noteCalculator.calculate(
+          averageFreq,
+          allowedNoteNames: _allowedNotes,
+        );
+        _lastDetectedResult = smoothedResult;
+        hapticManager.feedback(smoothedResult.status);
+        state = smoothedResult;
       },
       onError: (Object error, StackTrace stackTrace) {
         AppErrorReporter.reportNonFatal(
@@ -171,6 +198,14 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     // 3. Pipe Audio Data to Pitch Repo
     _audioSubscription = audioSource.audioStream.listen(
       (buffer) {
+        final sampleRate = audioSource.actualSampleRate;
+        if (sampleRate != null &&
+            sampleRate > 0 &&
+            (_lastInputSampleRate == null ||
+                (sampleRate - _lastInputSampleRate!).abs() >= 1.0)) {
+          _pitchRepo.updateInputSampleRate(sampleRate);
+          _lastInputSampleRate = sampleRate;
+        }
         _pitchRepo.addAudioData(buffer);
       },
       onError: (Object error, StackTrace stackTrace) {
@@ -188,17 +223,14 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
 
     // 4. Start Audio Capture
     final result = await audioSource.startCapture();
-    result.fold(
-      (failure) {
-        _logger.e("Failed to start audio capture: ${failure.message}");
-        AppErrorReporter.reportNonFatal(
-          StateError(failure.message),
-          StackTrace.current,
-          source: 'tuner_state.start_capture',
-        );
-      },
-      (_) => _logger.i("Audio capture started successfully"),
-    );
+    result.fold((failure) {
+      _logger.e("Failed to start audio capture: ${failure.message}");
+      AppErrorReporter.reportNonFatal(
+        StateError(failure.message),
+        StackTrace.current,
+        source: 'tuner_state.start_capture',
+      );
+    }, (_) => _logger.i("Audio capture started successfully"));
   }
 
   Future<void> stop() async {
@@ -215,6 +247,11 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     }
     _audioSubscription = null;
     _pitchSubscription = null;
+    _pendingNoSignalFrames = 0;
+    _lastDetectedAt = null;
+    _lastDetectedResult = null;
+    _lastInputSampleRate = null;
+    _frequencyBuffer.clear();
     try {
       await _ref.read(audioSourceProvider).stopCapture();
     } catch (error, stackTrace) {

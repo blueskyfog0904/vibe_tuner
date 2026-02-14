@@ -8,9 +8,9 @@ import 'package:pitch_detector_dart/pitch_detector_result.dart';
 
 import '../../../../core/constants/audio_constants.dart';
 import '../../../../core/math/note_calculator.dart';
-import '../../domain/entities/tuning_result.dart'; // Fixed import path
+import '../../domain/entities/tuning_result.dart';
 import '../../domain/entities/tuner_processing_config.dart';
-import '../../domain/repositories/pitch_repository.dart'; // Fixed import path
+import '../../domain/repositories/pitch_repository.dart';
 
 class PitchRepositoryImpl implements PitchRepository {
   final Logger _logger = Logger();
@@ -19,41 +19,39 @@ class PitchRepositoryImpl implements PitchRepository {
   SendPort? _sendPort;
   ReceivePort? _responsePort;
   StreamSubscription? _responseSubscription;
-  final StreamController<TuningResult> _pitchStreamController = StreamController.broadcast();
+  final StreamController<TuningResult> _pitchStreamController =
+      StreamController.broadcast();
 
   @override
   Stream<TuningResult> get pitchStream => _pitchStreamController.stream;
 
   @override
   Future<void> initialize() async {
-    // Guard against repeated start/stop cycles spawning multiple isolates.
     if (_isolate != null && _sendPort != null) {
-      _logger.d("PitchProcessor Isolate already initialized");
+      _logger.d('PitchProcessor Isolate already initialized');
       return;
     }
 
     final receivePort = ReceivePort();
-    _isolate = await Isolate.spawn(_pitchProcessorEntryPoint, receivePort.sendPort);
-    
-    // Wait for the isolate to send its SendPort
+    _isolate = await Isolate.spawn(
+      _pitchProcessorEntryPoint,
+      receivePort.sendPort,
+    );
+
     _sendPort = await receivePort.first as SendPort;
     receivePort.close();
-    
-    // Create a temporary receive port to get processed results back
+
     _responsePort = ReceivePort();
     _sendPort!.send({'type': 'init', 'port': _responsePort!.sendPort});
     _sendPort!.send({'type': 'config', 'config': _config.toMap()});
 
-    // Listen for results from the isolate
     _responseSubscription = _responsePort!.listen((message) {
-      if (message is TuningResult) {
-        if (!_pitchStreamController.isClosed) {
-          _pitchStreamController.add(message);
-        }
+      if (message is TuningResult && !_pitchStreamController.isClosed) {
+        _pitchStreamController.add(message);
       }
     });
 
-    _logger.i("PitchProcessor Isolate initialized");
+    _logger.i('PitchProcessor Isolate initialized');
   }
 
   @override
@@ -61,6 +59,14 @@ class PitchRepositoryImpl implements PitchRepository {
     _config = config;
     if (_sendPort != null) {
       _sendPort!.send({'type': 'config', 'config': _config.toMap()});
+    }
+  }
+
+  @override
+  void updateInputSampleRate(double sampleRate) {
+    if (sampleRate <= 0) return;
+    if (_sendPort != null) {
+      _sendPort!.send({'type': 'sample_rate', 'sampleRate': sampleRate});
     }
   }
 
@@ -81,66 +87,202 @@ class PitchRepositoryImpl implements PitchRepository {
     _isolate = null;
     _sendPort = null;
     _pitchStreamController.close();
-    _logger.i("PitchProcessor Isolate disposed");
+    _logger.i('PitchProcessor Isolate disposed');
   }
 
-  /// Entry point for the Isolate
   static void _pitchProcessorEntryPoint(SendPort mainSendPort) {
+    const detectorSizes = <int>[1024, 2048];
+    const minNoiseFloor = 0.0005;
+    const adaptiveNoiseMultiplier = 2.2;
+    const maxWindowsPerDetector = 4;
+
     final ReceivePort isolateReceivePort = ReceivePort();
     mainSendPort.send(isolateReceivePort.sendPort);
 
     SendPort? replyPort;
-    final pitchDetector = PitchDetector(
-      audioSampleRate: AudioConstants.sampleRate.toDouble(),
-      bufferSize: AudioConstants.bufferSize,
-    );
     final noteCalculator = NoteCalculator();
     var config = const TunerProcessingConfig.defaults();
+    var inputSampleRate = AudioConstants.sampleRate.toDouble();
+    var detectors = _buildDetectors(inputSampleRate, detectorSizes);
 
-    isolateReceivePort.listen((message) async { // Added async
-      if (message is Map) {
-        final type = message['type'];
+    var isProcessing = false;
+    List<double>? latestPendingBuffer;
 
-        if (type == 'init') {
-          replyPort = message['port'] as SendPort;
-        } else if (type == 'config') {
-          config = TunerProcessingConfig.fromMap(
-            message['config'] as Map<String, Object?>,
+    var noiseFloor = config.minRmsForPitch * 0.5;
+    var noiseFloorInitialized = false;
+
+    Future<void> processBuffer(List<double> buffer) async {
+      final targetPort = replyPort;
+      if (targetPort == null) return;
+      if (buffer.isEmpty) {
+        targetPort.send(TuningResult.noSignal());
+        return;
+      }
+
+      try {
+        _PitchFrameCandidate? bestCandidate;
+
+        for (final windowSize in detectorSizes) {
+          final detector = detectors[windowSize];
+          if (detector == null || buffer.length < windowSize) continue;
+
+          final hopSize = windowSize ~/ 4;
+          final starts = _windowStartIndices(
+            bufferLength: buffer.length,
+            windowSize: windowSize,
+            hopSize: hopSize,
+            maxWindows: maxWindowsPerDetector,
           );
-        } else if (type == 'data') {
-          if (replyPort != null) {
-            try {
-              final buffer = message['buffer'] as List<double>;
 
-              final rms = _calculateRms(buffer);
-              if (rms < config.minRmsForPitch) {
-                replyPort!.send(TuningResult.noSignal());
-                return;
-              }
-              
-              // Process pitch
-              // pitch_detector_dart 0.0.7 uses getPitchFromFloatBuffer for List<double>
-              final PitchDetectorResult result = await pitchDetector.getPitchFromFloatBuffer(buffer);
-              
-              if (shouldEmitPitchResult(
-                pitched: result.pitched,
+          for (final start in starts) {
+            final window = buffer.sublist(start, start + windowSize);
+            final rms = _calculateRms(window);
+
+            if (!noiseFloorInitialized) {
+              noiseFloor = rms;
+              noiseFloorInitialized = true;
+            } else if (rms < noiseFloor * 1.5) {
+              noiseFloor = (noiseFloor * 0.98) + (rms * 0.02);
+            }
+
+            final adaptiveMinRms = math.max(
+              config.minRmsForPitch,
+              math.max(minNoiseFloor, noiseFloor * adaptiveNoiseMultiplier),
+            );
+
+            if (rms < adaptiveMinRms) continue;
+
+            final PitchDetectorResult result = await detector
+                .getPitchFromFloatBuffer(window);
+
+            if (!_shouldEmitPitchResultWithMinRms(
+              pitched: result.pitched,
+              frequency: result.pitch,
+              rms: rms,
+              minRms: adaptiveMinRms,
+              config: config,
+            )) {
+              continue;
+            }
+
+            final score = result.probability + (windowSize == 1024 ? 0.01 : 0);
+            if (bestCandidate == null || score > bestCandidate.score) {
+              bestCandidate = _PitchFrameCandidate(
                 frequency: result.pitch,
-                rms: rms,
-                config: config,
-              )) {
-                // Calculate Note & Cents
-                final tuningResult = noteCalculator.calculate(result.pitch);
-                replyPort!.send(tuningResult);
-              } else {
-                replyPort!.send(TuningResult.noSignal());
+                score: score,
+              );
+              if (score >= 0.98) {
+                break;
               }
-            } catch (e) {
-              replyPort!.send(TuningResult.noSignal());
             }
           }
         }
+
+        if (bestCandidate == null) {
+          targetPort.send(TuningResult.noSignal());
+          return;
+        }
+
+        targetPort.send(noteCalculator.calculate(bestCandidate.frequency));
+      } catch (_) {
+        targetPort.send(TuningResult.noSignal());
+      }
+    }
+
+    void scheduleLatestProcessing() {
+      if (isProcessing || latestPendingBuffer == null) return;
+      final buffer = latestPendingBuffer!;
+      latestPendingBuffer = null;
+      isProcessing = true;
+      processBuffer(buffer).whenComplete(() {
+        isProcessing = false;
+        scheduleLatestProcessing();
+      });
+    }
+
+    isolateReceivePort.listen((message) {
+      if (message is! Map) return;
+      final type = message['type'];
+
+      if (type == 'init') {
+        replyPort = message['port'] as SendPort;
+        return;
+      }
+
+      if (type == 'config') {
+        config = TunerProcessingConfig.fromMap(
+          message['config'] as Map<String, Object?>,
+        );
+        return;
+      }
+
+      if (type == 'sample_rate') {
+        final rawSampleRate = message['sampleRate'];
+        if (rawSampleRate is num && rawSampleRate > 0) {
+          final next = rawSampleRate.toDouble();
+          if ((next - inputSampleRate).abs() >= 1.0) {
+            inputSampleRate = next;
+            detectors = _buildDetectors(inputSampleRate, detectorSizes);
+          }
+        }
+        return;
+      }
+
+      if (type == 'data' && replyPort != null) {
+        final rawBuffer = message['buffer'];
+        if (rawBuffer is List<double>) {
+          latestPendingBuffer = rawBuffer;
+        } else if (rawBuffer is List) {
+          latestPendingBuffer = rawBuffer.cast<double>();
+        } else {
+          return;
+        }
+        scheduleLatestProcessing();
       }
     });
+  }
+
+  static Map<int, PitchDetector> _buildDetectors(
+    double sampleRate,
+    List<int> sizes,
+  ) {
+    final map = <int, PitchDetector>{};
+    for (final size in sizes) {
+      map[size] = PitchDetector(audioSampleRate: sampleRate, bufferSize: size);
+    }
+    return map;
+  }
+
+  static List<int> _windowStartIndices({
+    required int bufferLength,
+    required int windowSize,
+    required int hopSize,
+    required int maxWindows,
+  }) {
+    if (bufferLength < windowSize || maxWindows <= 0) return const <int>[];
+
+    final starts = <int>[];
+    var start = bufferLength - windowSize;
+    while (start >= 0 && starts.length < maxWindows) {
+      starts.add(start);
+      start -= hopSize;
+    }
+    return starts;
+  }
+
+  static bool _shouldEmitPitchResultWithMinRms({
+    required bool pitched,
+    required double frequency,
+    required double rms,
+    required double minRms,
+    required TunerProcessingConfig config,
+  }) {
+    if (!pitched) return false;
+    if (!frequency.isFinite || frequency <= 0) return false;
+    if (rms < minRms) return false;
+    if (frequency < config.minDetectableFrequency) return false;
+    if (frequency > config.maxDetectableFrequency) return false;
+    return true;
   }
 
   static bool shouldEmitPitchResult({
@@ -164,4 +306,11 @@ class PitchRepositoryImpl implements PitchRepository {
     }
     return math.sqrt(sumSquares / samples.length);
   }
+}
+
+class _PitchFrameCandidate {
+  final double frequency;
+  final double score;
+
+  const _PitchFrameCandidate({required this.frequency, required this.score});
 }

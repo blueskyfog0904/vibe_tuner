@@ -7,11 +7,12 @@ import '../../domain/entities/tuner_settings.dart';
 
 final tunerSettingsProvider =
     AsyncNotifierProvider<TunerSettingsNotifier, TunerSettings>(
-  TunerSettingsNotifier.new,
-);
+      TunerSettingsNotifier.new,
+    );
 
 final tunerProcessingConfigProvider = Provider<TunerProcessingConfig>((ref) {
-  final settings = ref.watch(tunerSettingsProvider).valueOrNull ??
+  final settings =
+      ref.watch(tunerSettingsProvider).valueOrNull ??
       const TunerSettings.defaults();
   return TunerProcessingConfig(
     minRmsForPitch: settings.noiseGate,
@@ -37,7 +38,8 @@ double normalizeA4Reference(double value) {
   return (value - 432.0).abs() <= (value - 440.0).abs() ? 432.0 : 440.0;
 }
 
-double normalizeNoiseGate(double value) => value.clamp(minNoiseGate, maxNoiseGate);
+double normalizeNoiseGate(double value) =>
+    value.clamp(minNoiseGate, maxNoiseGate);
 
 double perfectCentsThresholdFromSensitivity(TunerSensitivity sensitivity) {
   return switch (sensitivity) {
@@ -72,7 +74,7 @@ class TunerSettingsNotifier extends AsyncNotifier<TunerSettings> {
         (e) => e.name == _prefs!.getString(_keySensitivity),
         orElse: () => TunerSensitivity.medium,
       ),
-      noiseGate: normalizeNoiseGate(_prefs!.getDouble(_keyNoiseGate) ?? 0.01),
+      noiseGate: normalizeNoiseGate(_prefs!.getDouble(_keyNoiseGate) ?? 0.005),
       tuningPreset: TuningPreset.values.firstWhere(
         (e) => e.name == _prefs!.getString(_keyTuningPreset),
         orElse: () => TuningPreset.chromatic,

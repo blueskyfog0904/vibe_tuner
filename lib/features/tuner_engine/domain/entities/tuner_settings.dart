@@ -16,10 +16,10 @@ class TunerSettings {
   });
 
   const TunerSettings.defaults()
-      : a4Reference = 440.0,
-        sensitivity = TunerSensitivity.medium,
-        noiseGate = 0.01,
-        tuningPreset = TuningPreset.chromatic;
+    : a4Reference = 440.0,
+      sensitivity = TunerSensitivity.medium,
+      noiseGate = 0.005,
+      tuningPreset = TuningPreset.chromatic;
 
   TunerSettings copyWith({
     double? a4Reference,
@@ -51,7 +51,7 @@ class TunerSettings {
         (e) => e.name == map['sensitivity'],
         orElse: () => TunerSensitivity.medium,
       ),
-      noiseGate: (map['noiseGate'] as num?)?.toDouble() ?? 0.01,
+      noiseGate: (map['noiseGate'] as num?)?.toDouble() ?? 0.005,
       tuningPreset: TuningPreset.values.firstWhere(
         (e) => e.name == map['tuningPreset'],
         orElse: () => TuningPreset.chromatic,
