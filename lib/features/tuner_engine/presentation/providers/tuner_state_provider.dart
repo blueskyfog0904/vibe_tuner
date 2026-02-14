@@ -31,37 +31,60 @@ final hapticManagerProvider = Provider<HapticManager>((ref) => HapticManager());
 /// Main Tuner State Provider
 final tunerStateProvider =
     StateNotifierProvider.autoDispose<TunerStateNotifier, TuningResult>((ref) {
-      // We watch the pitch repo so that if it changes (recreated), we recreate the notifier.
-      // Also keeps the repo alive as long as the notifier is alive.
+      // Keep repository lifecycle tied to notifier lifecycle.
       final pitchRepo = ref.watch(pitchRepositoryProvider);
-      final config = ref.watch(tunerProcessingConfigProvider);
+      final config = ref.read(tunerProcessingConfigProvider);
       final settings =
-          ref.watch(tunerSettingsProvider).valueOrNull ??
+          ref.read(tunerSettingsProvider).valueOrNull ??
           const TunerSettings.defaults();
-      return TunerStateNotifier(ref, pitchRepo, config, settings);
+      final notifier = TunerStateNotifier(ref, pitchRepo, config, settings);
+
+      ref.listen(tunerProcessingConfigProvider, (_, next) {
+        notifier.updateProcessingConfig(next);
+      });
+      ref.listen(tunerSettingsProvider, (_, next) {
+        final current = next.valueOrNull ?? const TunerSettings.defaults();
+        notifier.updateTuningSettings(current);
+      });
+      return notifier;
     });
 
 class TunerStateNotifier extends StateNotifier<TuningResult> {
-  static const int _noSignalHoldMs = AudioConstants.noSignalHoldMs;
-  static const int _noSignalDropFrames = AudioConstants.noSignalDropFrames;
-
   final Ref _ref;
   final PitchRepository _pitchRepo;
-  final TunerProcessingConfig _config;
-  final TunerSettings _settings;
-  late final Set<String>? _allowedNotes;
+  TunerProcessingConfig _config;
+  TunerSettings _settings;
+  late Set<String>? _allowedNotes;
+  late Set<int>? _allowedMidiNumbers;
   final Logger _logger = Logger();
   final Queue<double> _frequencyBuffer = Queue<double>();
-  late final NoteCalculator _noteCalculator;
+  late NoteCalculator _noteCalculator;
   StreamSubscription? _audioSubscription;
   StreamSubscription? _pitchSubscription;
   DateTime? _lastDetectedAt;
   TuningResult? _lastDetectedResult;
+  StringSensitivityProfile? _activeStringProfile;
   int _pendingNoSignalFrames = 0;
   double? _lastInputSampleRate;
+  Future<void> _lifecycleOps = Future<void>.value();
 
   TunerStateNotifier(this._ref, this._pitchRepo, this._config, this._settings)
     : super(TuningResult.noSignal()) {
+    _rebuildDerivedSettings();
+    start();
+  }
+
+  void updateProcessingConfig(TunerProcessingConfig config) {
+    _config = config;
+    _pitchRepo.updateProcessingConfig(config);
+  }
+
+  void updateTuningSettings(TunerSettings settings) {
+    _settings = settings;
+    _rebuildDerivedSettings();
+  }
+
+  void _rebuildDerivedSettings() {
     _noteCalculator = NoteCalculator(
       a4Reference: _settings.a4Reference,
       perfectCentsThreshold: perfectCentsThresholdFromSensitivity(
@@ -69,21 +92,21 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
       ),
     );
     _allowedNotes = allowedNoteNamesFromPreset(_settings.tuningPreset);
-    // _initialize(); // Don't auto-start. Let the UI control it.
-    // Or auto-start if that's the default behavior expected.
-    // For integration, let's allow manual start/stop.
-    // But to keep backward compatibility with existing tests, maybe auto-start?
-    // Let's stick to explicit start() call in the UI or auto-start here but provide stop().
-    start();
+    _allowedMidiNumbers = allowedMidiNumbersFromPreset(_settings.tuningPreset);
   }
 
   Future<void> start() async {
-    if (_audioSubscription != null) return; // Already started
+    return _enqueueLifecycleOp(_startInternal);
+  }
+
+  Future<void> _startInternal() async {
+    if (_audioSubscription != null) return;
 
     _logger.i("TunerStateNotifier: Starting...");
     _pendingNoSignalFrames = 0;
     _lastDetectedAt = null;
     _lastDetectedResult = null;
+    _activeStringProfile = null;
     _lastInputSampleRate = null;
     _frequencyBuffer.clear();
     final audioSource = _ref.read(audioSourceProvider);
@@ -146,11 +169,16 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
         if (rawResult.status == TuningStatus.noSignal) {
           _pendingNoSignalFrames++;
           final now = DateTime.now();
+          final noSignalHoldMs =
+              _activeStringProfile?.noSignalHoldMs ??
+              AudioConstants.noSignalHoldMs;
+          final noSignalDropFrames =
+              _activeStringProfile?.noSignalDropFrames ??
+              AudioConstants.noSignalDropFrames;
           final withinHoldWindow =
               _lastDetectedAt != null &&
-              now.difference(_lastDetectedAt!).inMilliseconds <=
-                  _noSignalHoldMs;
-          final belowDropFrames = _pendingNoSignalFrames < _noSignalDropFrames;
+              now.difference(_lastDetectedAt!).inMilliseconds <= noSignalHoldMs;
+          final belowDropFrames = _pendingNoSignalFrames < noSignalDropFrames;
 
           if ((withinHoldWindow || belowDropFrames) &&
               _lastDetectedResult != null) {
@@ -160,14 +188,19 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
 
           _frequencyBuffer.clear();
           _lastDetectedResult = null;
+          _activeStringProfile = null;
           state = rawResult;
           return;
         }
 
         _pendingNoSignalFrames = 0;
         _lastDetectedAt = DateTime.now();
+        _activeStringProfile = _config.profileForFrequency(rawResult.frequency);
+        final smoothingWindowSize =
+            _activeStringProfile?.smoothingWindowSize ??
+            _config.smoothingWindowSize;
         _frequencyBuffer.add(rawResult.frequency);
-        if (_frequencyBuffer.length > _config.smoothingWindowSize) {
+        while (_frequencyBuffer.length > smoothingWindowSize) {
           _frequencyBuffer.removeFirst();
         }
 
@@ -177,6 +210,7 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
         final smoothedResult = _noteCalculator.calculate(
           averageFreq,
           allowedNoteNames: _allowedNotes,
+          allowedMidiNumbers: _allowedMidiNumbers,
         );
         _lastDetectedResult = smoothedResult;
         hapticManager.feedback(smoothedResult.status);
@@ -234,6 +268,10 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
   }
 
   Future<void> stop() async {
+    return _enqueueLifecycleOp(_stopInternal);
+  }
+
+  Future<void> _stopInternal() async {
     _logger.i("TunerStateNotifier: Stopping...");
     try {
       await _audioSubscription?.cancel();
@@ -250,6 +288,7 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     _pendingNoSignalFrames = 0;
     _lastDetectedAt = null;
     _lastDetectedResult = null;
+    _activeStringProfile = null;
     _lastInputSampleRate = null;
     _frequencyBuffer.clear();
     try {
@@ -263,9 +302,14 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     }
   }
 
+  Future<void> _enqueueLifecycleOp(Future<void> Function() op) {
+    _lifecycleOps = _lifecycleOps.then((_) => op()).catchError((_) {});
+    return _lifecycleOps;
+  }
+
   @override
   void dispose() {
-    stop();
+    unawaited(stop());
     super.dispose();
   }
 }

@@ -3,7 +3,18 @@ import '../../features/tuner_engine/domain/entities/tuning_result.dart';
 
 class NoteCalculator {
   static const List<String> _noteNames = [
-    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+    "C",
+    "C#",
+    "D",
+    "D#",
+    "E",
+    "F",
+    "F#",
+    "G",
+    "G#",
+    "A",
+    "A#",
+    "B",
   ];
   static const Map<String, int> _noteIndexMap = {
     'C': 0,
@@ -19,7 +30,7 @@ class NoteCalculator {
     'A#': 10,
     'B': 11,
   };
-  
+
   final double a4Reference;
   final double perfectCentsThreshold;
 
@@ -30,7 +41,11 @@ class NoteCalculator {
 
   /// Calculates the TuningResult for a given frequency.
   /// Returns TuningResult.noSignal() if frequency is below reasonable threshold (e.g. 20Hz).
-  TuningResult calculate(double frequency, {Set<String>? allowedNoteNames}) {
+  TuningResult calculate(
+    double frequency, {
+    Set<String>? allowedNoteNames,
+    Set<int>? allowedMidiNumbers,
+  }) {
     if (frequency < 20.0) {
       return TuningResult.noSignal();
     }
@@ -38,15 +53,17 @@ class NoteCalculator {
     final int roundedMidi = _closestMidiForFrequency(
       frequency,
       allowedNoteNames: allowedNoteNames,
+      allowedMidiNumbers: allowedMidiNumbers,
     );
-    
+
     // 2. Determine Note Name & Octave
     final int noteIndex = roundedMidi % 12;
     final int octave = (roundedMidi / 12).floor() - 1;
     final String noteName = _noteNames[noteIndex];
 
     // 3. Calculate Target Frequency for the closest note
-    final double targetFrequency = a4Reference * pow(2, (roundedMidi - 69) / 12);
+    final double targetFrequency =
+        a4Reference * pow(2, (roundedMidi - 69) / 12);
 
     // 4. Calculate Cents
     // cents = 1200 * log2(f / target_f)
@@ -75,9 +92,27 @@ class NoteCalculator {
   int _closestMidiForFrequency(
     double frequency, {
     Set<String>? allowedNoteNames,
+    Set<int>? allowedMidiNumbers,
   }) {
     final midiNumber = 69 + 12 * (log(frequency / a4Reference) / log(2));
     final defaultRounded = midiNumber.round();
+    final normalizedAllowedMidi = allowedMidiNumbers
+        ?.where((midi) => midi >= 0 && midi <= 127)
+        .toSet();
+    if (normalizedAllowedMidi != null && normalizedAllowedMidi.isNotEmpty) {
+      var bestMidi = defaultRounded;
+      var bestDistance = double.infinity;
+      for (final midi in normalizedAllowedMidi) {
+        final freq = a4Reference * pow(2, (midi - 69) / 12);
+        final distance = (freq - frequency).abs();
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestMidi = midi;
+        }
+      }
+      return bestMidi;
+    }
+
     final normalizedAllowed = allowedNoteNames
         ?.map((e) => e.toUpperCase())
         .where(_noteIndexMap.containsKey)

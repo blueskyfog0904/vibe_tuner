@@ -10,7 +10,8 @@ class TunerSettingsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(tunerSettingsProvider).valueOrNull ??
+    final settings =
+        ref.watch(tunerSettingsProvider).valueOrNull ??
         const TunerSettings.defaults();
     final notifier = ref.read(tunerSettingsProvider.notifier);
 
@@ -43,7 +44,10 @@ class TunerSettingsPage extends ConsumerWidget {
           SegmentedButton<TunerSensitivity>(
             segments: const [
               ButtonSegment(value: TunerSensitivity.low, label: Text('Low')),
-              ButtonSegment(value: TunerSensitivity.medium, label: Text('Medium')),
+              ButtonSegment(
+                value: TunerSensitivity.medium,
+                label: Text('Medium'),
+              ),
               ButtonSegment(value: TunerSensitivity.high, label: Text('High')),
             ],
             selected: {settings.sensitivity},
@@ -88,6 +92,132 @@ class TunerSettingsPage extends ConsumerWidget {
             },
           ),
           const SizedBox(height: 20),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Low Latency Tuner'),
+            subtitle: const Text(
+              'Faster response, less lingering after note-off',
+            ),
+            value: settings.lowLatencyMode,
+            onChanged: notifier.setLowLatencyMode,
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: notifier.applyIphone11ProGuitarPreset,
+            icon: const Icon(Icons.phone_iphone),
+            label: const Text('Apply iPhone 11 Pro Guitar Preset'),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Per-String Sensitivity (1-6)',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Higher value = more sensitive',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          const SizedBox(height: 8),
+          for (int stringNumber = 1; stringNumber <= 6; stringNumber++) ...[
+            Text(
+              '${stringSensitivityLabel(stringNumber)} '
+              '(${settings.sensitivityForString(stringNumber).toStringAsFixed(2)})',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Sensitivity (${settings.sensitivityForString(stringNumber).toStringAsFixed(2)})',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            Text(
+              'Range: ${minStringSensitivity.toStringAsFixed(1)} ~ ${maxStringSensitivity.toStringAsFixed(1)}',
+              style: const TextStyle(fontSize: 11, color: Colors.black45),
+            ),
+            Slider(
+              min: minStringSensitivity,
+              max: maxStringSensitivity,
+              divisions: 45,
+              value: settings.sensitivityForString(stringNumber),
+              onChanged: (value) {
+                notifier.setStringSensitivity(stringNumber, value);
+              },
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'min ${minStringSensitivity.toStringAsFixed(1)}',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+                Text(
+                  'max ${maxStringSensitivity.toStringAsFixed(1)}',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+              ],
+            ),
+            Text(
+              'Sustain Hold (${settings.holdMsForString(stringNumber)} ms)',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            Text(
+              'Range: $minStringHoldMs ~ $maxStringHoldMs ms',
+              style: const TextStyle(fontSize: 11, color: Colors.black45),
+            ),
+            Slider(
+              min: minStringHoldMs.toDouble(),
+              max: maxStringHoldMs.toDouble(),
+              divisions: (maxStringHoldMs - minStringHoldMs) ~/ 20,
+              value: settings.holdMsForString(stringNumber).toDouble(),
+              onChanged: (value) {
+                notifier.setStringHoldMs(stringNumber, value.round());
+              },
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'min $minStringHoldMs ms',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+                Text(
+                  'max $maxStringHoldMs ms',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+              ],
+            ),
+            Text(
+              'Stability (${settings.stabilityWindowForString(stringNumber)})',
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            Text(
+              'Range: $minStringStabilityWindow ~ $maxStringStabilityWindow',
+              style: const TextStyle(fontSize: 11, color: Colors.black45),
+            ),
+            Slider(
+              min: minStringStabilityWindow.toDouble(),
+              max: maxStringStabilityWindow.toDouble(),
+              divisions: maxStringStabilityWindow - minStringStabilityWindow,
+              value: settings.stabilityWindowForString(stringNumber).toDouble(),
+              onChanged: (value) {
+                notifier.setStringStabilityWindow(stringNumber, value.round());
+              },
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'min $minStringStabilityWindow',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+                Text(
+                  'max $maxStringStabilityWindow',
+                  style: const TextStyle(fontSize: 11, color: Colors.black45),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+          ],
+          const SizedBox(height: 20),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.bug_report_outlined),
@@ -95,11 +225,9 @@ class TunerSettingsPage extends ConsumerWidget {
             subtitle: const Text('최근 에러 확인 및 복사'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => const ErrorLogsPage(),
-                ),
-              );
+              Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const ErrorLogsPage()));
             },
           ),
         ],

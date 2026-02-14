@@ -91,10 +91,8 @@ class PitchRepositoryImpl implements PitchRepository {
   }
 
   static void _pitchProcessorEntryPoint(SendPort mainSendPort) {
-    const detectorSizes = <int>[1024, 2048];
     const minNoiseFloor = 0.0005;
     const adaptiveNoiseMultiplier = 2.2;
-    const maxWindowsPerDetector = 4;
 
     final ReceivePort isolateReceivePort = ReceivePort();
     mainSendPort.send(isolateReceivePort.sendPort);
@@ -103,6 +101,9 @@ class PitchRepositoryImpl implements PitchRepository {
     final noteCalculator = NoteCalculator();
     var config = const TunerProcessingConfig.defaults();
     var inputSampleRate = AudioConstants.sampleRate.toDouble();
+    var detectorSizes = _sanitizeDetectorWindowSizes(
+      config.detectorWindowSizes,
+    );
     var detectors = _buildDetectors(inputSampleRate, detectorSizes);
 
     var isProcessing = false;
@@ -131,7 +132,7 @@ class PitchRepositoryImpl implements PitchRepository {
             bufferLength: buffer.length,
             windowSize: windowSize,
             hopSize: hopSize,
-            maxWindows: maxWindowsPerDetector,
+            maxWindows: config.maxWindowsPerDetector,
           );
 
           for (final start in starts) {
@@ -210,9 +211,20 @@ class PitchRepositoryImpl implements PitchRepository {
       }
 
       if (type == 'config') {
-        config = TunerProcessingConfig.fromMap(
+        final nextConfig = TunerProcessingConfig.fromMap(
           message['config'] as Map<String, Object?>,
         );
+        final nextDetectorSizes = _sanitizeDetectorWindowSizes(
+          nextConfig.detectorWindowSizes,
+        );
+        final shouldRebuildDetectors =
+            nextDetectorSizes.length != detectorSizes.length ||
+            nextDetectorSizes.any((size) => !detectorSizes.contains(size));
+        config = nextConfig;
+        if (shouldRebuildDetectors) {
+          detectorSizes = nextDetectorSizes;
+          detectors = _buildDetectors(inputSampleRate, detectorSizes);
+        }
         return;
       }
 
@@ -253,6 +265,12 @@ class PitchRepositoryImpl implements PitchRepository {
     return map;
   }
 
+  static List<int> _sanitizeDetectorWindowSizes(List<int> rawSizes) {
+    final cleaned = rawSizes.where((size) => size > 0).toSet().toList()..sort();
+    if (cleaned.isEmpty) return const [1024, 2048];
+    return cleaned;
+  }
+
   static List<int> _windowStartIndices({
     required int bufferLength,
     required int windowSize,
@@ -279,7 +297,7 @@ class PitchRepositoryImpl implements PitchRepository {
   }) {
     if (!pitched) return false;
     if (!frequency.isFinite || frequency <= 0) return false;
-    if (rms < minRms) return false;
+    if (rms < _minRmsForFrequency(config, frequency, minRms)) return false;
     if (frequency < config.minDetectableFrequency) return false;
     if (frequency > config.maxDetectableFrequency) return false;
     return true;
@@ -292,10 +310,23 @@ class PitchRepositoryImpl implements PitchRepository {
     required TunerProcessingConfig config,
   }) {
     if (!pitched) return false;
-    if (rms < config.minRmsForPitch) return false;
+    if (rms < _minRmsForFrequency(config, frequency, config.minRmsForPitch)) {
+      return false;
+    }
     if (frequency < config.minDetectableFrequency) return false;
     if (frequency > config.maxDetectableFrequency) return false;
     return true;
+  }
+
+  static double _minRmsForFrequency(
+    TunerProcessingConfig config,
+    double frequency,
+    double baselineMinRms,
+  ) {
+    final profile = config.profileForFrequency(frequency);
+    if (profile == null) return baselineMinRms;
+    final adjusted = baselineMinRms * profile.rmsMultiplier;
+    return math.max(0.0001, adjusted);
   }
 
   static double _calculateRms(List<double> samples) {

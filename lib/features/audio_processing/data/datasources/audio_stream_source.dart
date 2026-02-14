@@ -13,12 +13,16 @@ class AudioStreamSource {
   final StreamController<List<double>> _audioStreamController =
       StreamController.broadcast();
   final Logger _logger = Logger();
+  bool _isCapturing = false;
 
   Stream<List<double>> get audioStream => _audioStreamController.stream;
   double? get actualSampleRate => _audioCapture.actualSampleRate;
 
   /// 오디오 캡쳐 시작
   Future<Either<Failure, void>> startCapture() async {
+    if (_isCapturing) {
+      return const Right(null);
+    }
     try {
       await _audioCapture.init(); // Initialize the plugin
       _logger.d("AudioCapture initialized");
@@ -37,6 +41,7 @@ class AudioStreamSource {
         },
         (Object e) {
           _logger.e("Audio Capture Error: $e");
+          _isCapturing = false;
           AppErrorReporter.reportNonFatal(
             e,
             StackTrace.current,
@@ -51,8 +56,10 @@ class AudioStreamSource {
         sampleRate: AudioConstants.sampleRate,
         bufferSize: AudioConstants.bufferSize,
       );
+      _isCapturing = true;
       return const Right(null);
     } catch (e, stackTrace) {
+      _isCapturing = false;
       AppErrorReporter.reportNonFatal(
         e,
         stackTrace,
@@ -68,6 +75,7 @@ class AudioStreamSource {
 
   /// 오디오 캡쳐 중지
   Future<void> stopCapture() async {
+    if (!_isCapturing) return;
     try {
       await _audioCapture.stop();
     } catch (e, stackTrace) {
@@ -76,6 +84,9 @@ class AudioStreamSource {
         stackTrace,
         source: 'audio_stream_source.stop_capture',
       );
+    } finally {
+      // Always clear local capture flag so future restarts are not blocked.
+      _isCapturing = false;
     }
   }
 

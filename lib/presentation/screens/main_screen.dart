@@ -18,15 +18,38 @@ class MainScreen extends ConsumerStatefulWidget {
   ConsumerState<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends ConsumerState<MainScreen> {
+class _MainScreenState extends ConsumerState<MainScreen>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _updateActiveTabContext(0);
     // Initial Resource Setup
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _manageResources(0);
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final currentIndex = ref.read(mainTabProvider);
+    if (state == AppLifecycleState.resumed) {
+      _manageResources(currentIndex);
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _suspendAudioResources();
+    }
   }
 
   void _manageResources(int index) {
@@ -56,6 +79,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     }
   }
 
+  void _suspendAudioResources() {
+    final tunerNotifier = ref.read(tunerStateProvider.notifier);
+    final gameNotifier = ref.read(gameControllerProvider.notifier);
+    final metronomeNotifier = ref.read(metronomeProvider.notifier);
+    tunerNotifier.stop();
+    gameNotifier.stop();
+    metronomeNotifier.stop(resetBeat: false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentIndex = ref.watch(mainTabProvider);
@@ -72,10 +104,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       body: IndexedStack(
         index: currentIndex,
         children: const [
-          TunerPage(),           // Tuner
-          ChordLibraryPage(),    // Chords
-          GameScreen(),          // Ear Training
-          MetronomePage(),       // Metronome
+          TunerPage(), // Tuner
+          ChordLibraryPage(), // Chords
+          GameScreen(), // Ear Training
+          MetronomePage(), // Metronome
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
@@ -84,10 +116,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           ref.read(mainTabProvider.notifier).state = index;
         },
         items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.graphic_eq),
-            label: 'Tuner',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.graphic_eq), label: 'Tuner'),
           BottomNavigationBarItem(
             icon: Icon(Icons.library_books),
             label: 'Chords',

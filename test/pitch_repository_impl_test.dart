@@ -60,4 +60,68 @@ void main() {
 
     expect(shouldEmit, isTrue);
   });
+
+  test(
+    'applies stricter threshold for low-string profile (5th string area)',
+    () {
+      const profiledConfig = TunerProcessingConfig(
+        minRmsForPitch: 0.01,
+        minDetectableFrequency: 50,
+        maxDetectableFrequency: 1500,
+        smoothingWindowSize: 5,
+        stringProfiles: [
+          StringSensitivityProfile(
+            stringNumber: 5,
+            minFrequency: 96,
+            maxFrequency: 132,
+            rmsMultiplier: 1.2,
+            smoothingWindowSize: 9,
+            noSignalHoldMs: 360,
+            noSignalDropFrames: 3,
+          ),
+        ],
+      );
+
+      final shouldEmit = PitchRepositoryImpl.shouldEmitPitchResult(
+        pitched: true,
+        frequency: 110,
+        rms: 0.011,
+        config: profiledConfig,
+      );
+
+      expect(shouldEmit, isFalse);
+    },
+  );
+
+  test(
+    'applies boosted sensitivity for high-string profile (1st string area)',
+    () {
+      const profiledConfig = TunerProcessingConfig(
+        minRmsForPitch: 0.01,
+        minDetectableFrequency: 50,
+        maxDetectableFrequency: 1500,
+        smoothingWindowSize: 5,
+        stringProfiles: [
+          StringSensitivityProfile(
+            stringNumber: 1,
+            minFrequency: 286,
+            maxFrequency: 380,
+            rmsMultiplier: 0.7,
+            smoothingWindowSize: 3,
+            noSignalHoldMs: 700,
+            noSignalDropFrames: 7,
+          ),
+        ],
+      );
+
+      final shouldEmit = PitchRepositoryImpl.shouldEmitPitchResult(
+        pitched: true,
+        frequency: 330,
+        rms: 0.008,
+        config: profiledConfig,
+      );
+
+      expect(shouldEmit, isTrue);
+    },
+  );
 }
