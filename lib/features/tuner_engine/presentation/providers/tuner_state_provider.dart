@@ -67,6 +67,12 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
   int _pendingNoSignalFrames = 0;
   double? _lastInputSampleRate;
   Future<void> _lifecycleOps = Future<void>.value();
+  TuningStatus _stableStatus = TuningStatus.noSignal;
+  TuningStatus? _pendingStatus;
+  int _pendingStatusFrames = 0;
+  double? _smoothedCents;
+
+  static const int _requiredStableStatusFrames = 2;
 
   TunerStateNotifier(this._ref, this._pitchRepo, this._config, this._settings)
     : super(TuningResult.noSignal()) {
@@ -109,6 +115,10 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     _activeStringProfile = null;
     _lastInputSampleRate = null;
     _frequencyBuffer.clear();
+    _stableStatus = TuningStatus.noSignal;
+    _pendingStatus = null;
+    _pendingStatusFrames = 0;
+    _smoothedCents = null;
     final audioSource = _ref.read(audioSourceProvider);
     final hapticManager = _ref.read(hapticManagerProvider);
 
@@ -189,6 +199,10 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
           _frequencyBuffer.clear();
           _lastDetectedResult = null;
           _activeStringProfile = null;
+          _stableStatus = TuningStatus.noSignal;
+          _pendingStatus = null;
+          _pendingStatusFrames = 0;
+          _smoothedCents = null;
           state = rawResult;
           return;
         }
@@ -212,9 +226,25 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
           allowedNoteNames: _allowedNotes,
           allowedMidiNumbers: _allowedMidiNumbers,
         );
-        _lastDetectedResult = smoothedResult;
-        hapticManager.feedback(smoothedResult.status);
-        state = smoothedResult;
+
+        final smoothedCents = _smoothCents(
+          rawCents: smoothedResult.cents,
+          smoothingWindowSize: smoothingWindowSize,
+        );
+        final stableStatus = _stabilizeStatus(smoothedResult.status);
+        _smoothedCents = smoothedCents;
+
+        final filteredResult = TuningResult(
+          frequency: averageFreq,
+          noteName: smoothedResult.noteName,
+          octave: smoothedResult.octave,
+          cents: smoothedCents,
+          targetFrequency: smoothedResult.targetFrequency,
+          status: stableStatus,
+        );
+        _lastDetectedResult = filteredResult;
+        hapticManager.feedback(filteredResult.status);
+        state = filteredResult;
       },
       onError: (Object error, StackTrace stackTrace) {
         AppErrorReporter.reportNonFatal(
@@ -290,6 +320,10 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
     _lastDetectedResult = null;
     _activeStringProfile = null;
     _lastInputSampleRate = null;
+    _stableStatus = TuningStatus.noSignal;
+    _pendingStatus = null;
+    _pendingStatusFrames = 0;
+    _smoothedCents = null;
     _frequencyBuffer.clear();
     try {
       await _ref.read(audioSourceProvider).stopCapture();
@@ -311,5 +345,46 @@ class TunerStateNotifier extends StateNotifier<TuningResult> {
   void dispose() {
     unawaited(stop());
     super.dispose();
+  }
+
+  double _smoothCents({
+    required double rawCents,
+    required int smoothingWindowSize,
+  }) {
+    final previous = _smoothedCents;
+    if (previous == null) return rawCents;
+
+    final alpha = _centsSmoothingFactor(smoothingWindowSize);
+    return previous + (rawCents - previous) * alpha;
+  }
+
+  double _centsSmoothingFactor(int smoothingWindowSize) {
+    final normalizedWindow = smoothingWindowSize.clamp(2, 12);
+    return (0.45 - (normalizedWindow - 2) * 0.015).clamp(0.16, 0.45);
+  }
+
+  TuningStatus _stabilizeStatus(TuningStatus candidateStatus) {
+    if (candidateStatus == TuningStatus.noSignal) {
+      _stableStatus = TuningStatus.noSignal;
+      _pendingStatus = null;
+      _pendingStatusFrames = 0;
+      return TuningStatus.noSignal;
+    }
+
+    if (_pendingStatus != candidateStatus) {
+      _pendingStatus = candidateStatus;
+      _pendingStatusFrames = 1;
+      return _stableStatus;
+    }
+
+    _pendingStatusFrames++;
+    if (_pendingStatusFrames >= _requiredStableStatusFrames) {
+      _stableStatus = candidateStatus;
+      _pendingStatus = null;
+      _pendingStatusFrames = 0;
+      return _stableStatus;
+    }
+
+    return _stableStatus;
   }
 }

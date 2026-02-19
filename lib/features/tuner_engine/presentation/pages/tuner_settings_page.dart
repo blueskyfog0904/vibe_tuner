@@ -107,6 +107,12 @@ class TunerSettingsPage extends ConsumerWidget {
             icon: const Icon(Icons.phone_iphone),
             label: const Text('Apply iPhone 11 Pro Guitar Preset'),
           ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: notifier.applyIndoorQuietGuitarPreset,
+            icon: const Icon(Icons.music_note),
+            label: const Text('Apply Indoor Quiet Guitar Preset'),
+          ),
           const SizedBox(height: 24),
           const Text(
             'Per-String Sensitivity (1-6)',

@@ -234,4 +234,29 @@ void main() {
       iphone11ProRecommendedStabilityWindows,
     );
   });
+
+  test('indoor quiet preset applies sustain-focused values', () async {
+    SharedPreferences.setMockInitialValues({});
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await container.read(tunerSettingsProvider.future);
+    final notifier = container.read(tunerSettingsProvider.notifier);
+    await notifier.applyIndoorQuietGuitarPreset();
+
+    final current = container.read(tunerSettingsProvider).valueOrNull;
+    expect(current, isNotNull);
+    expect(current!.tuningPreset, TuningPreset.guitarStandard);
+    expect(current.lowLatencyMode, isFalse);
+    expect(current.noiseGate, closeTo(0.0038, 0.0001));
+    expect(
+      current.stringSensitivities,
+      indoorQuietGuitarRecommendedStringSensitivities,
+    );
+    expect(current.stringHoldMs, indoorQuietGuitarRecommendedStringHoldMs);
+    expect(
+      current.stringStabilityWindows,
+      indoorQuietGuitarRecommendedStabilityWindows,
+    );
+  });
 }

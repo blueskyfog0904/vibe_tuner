@@ -246,6 +246,31 @@ const iphone11ProRecommendedStabilityWindows = <int, int>{
   6: 4,
 };
 
+const indoorQuietGuitarRecommendedStringSensitivities = <int, double>{
+  1: 3.8,
+  2: 2.4,
+  3: 2.1,
+  4: 1.5,
+  5: 1.2,
+  6: 2.0,
+};
+const indoorQuietGuitarRecommendedStringHoldMs = <int, int>{
+  1: 900,
+  2: 800,
+  3: 720,
+  4: 580,
+  5: 500,
+  6: 650,
+};
+const indoorQuietGuitarRecommendedStabilityWindows = <int, int>{
+  1: 6,
+  2: 6,
+  3: 6,
+  4: 6,
+  5: 6,
+  6: 6,
+};
+
 double normalizeStringSensitivity(double value) =>
     value.clamp(minStringSensitivity, maxStringSensitivity);
 int normalizeStringHoldMs(int value) =>
@@ -456,6 +481,41 @@ class TunerSettingsNotifier extends AsyncNotifier<TunerSettings> {
       stringStabilityWindows: iphone11ProRecommendedStabilityWindows,
     );
     state = AsyncData(next);
+    await _prefs?.setString(_keyTuningPreset, next.tuningPreset.name);
+    await _prefs?.setBool(_keyLowLatencyMode, next.lowLatencyMode);
+    await _prefs?.setDouble(_keyNoiseGate, next.noiseGate);
+    for (final entry in next.stringSensitivities.entries) {
+      await _prefs?.setDouble(
+        '$_keyStringSensitivityPrefix${entry.key}',
+        normalizeStringSensitivity(entry.value),
+      );
+    }
+    for (final entry in next.stringHoldMs.entries) {
+      await _prefs?.setInt(
+        '$_keyStringHoldMsPrefix${entry.key}',
+        normalizeStringHoldMs(entry.value),
+      );
+    }
+    for (final entry in next.stringStabilityWindows.entries) {
+      await _prefs?.setInt(
+        '$_keyStringStabilityPrefix${entry.key}',
+        normalizeStringStabilityWindow(entry.value),
+      );
+    }
+  }
+
+  Future<void> applyIndoorQuietGuitarPreset() async {
+    final current = state.valueOrNull ?? const TunerSettings.defaults();
+    final next = current.copyWith(
+      tuningPreset: TuningPreset.guitarStandard,
+      lowLatencyMode: false,
+      noiseGate: normalizeNoiseGate(0.0038),
+      stringSensitivities: indoorQuietGuitarRecommendedStringSensitivities,
+      stringHoldMs: indoorQuietGuitarRecommendedStringHoldMs,
+      stringStabilityWindows: indoorQuietGuitarRecommendedStabilityWindows,
+    );
+    state = AsyncData(next);
+
     await _prefs?.setString(_keyTuningPreset, next.tuningPreset.name);
     await _prefs?.setBool(_keyLowLatencyMode, next.lowLatencyMode);
     await _prefs?.setDouble(_keyNoiseGate, next.noiseGate);
